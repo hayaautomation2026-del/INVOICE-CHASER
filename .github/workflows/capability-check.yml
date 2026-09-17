@@ -1,0 +1,31 @@
+name: Stage 0 Windows capability
+on:
+  push:
+    paths:
+      - '.github/workflows/capability-check.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Record Windows environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor
+          @{
+            platform = "Windows"
+            os = $os.Caption
+            version = $os.Version
+            cpu = @($cpu.Name)
+            logical_processors = [Environment]::ProcessorCount
+            ram_bytes = [long]$os.TotalVisibleMemorySize * 1024
+            note = "Hosted Windows CI capability only; not consumer hardware performance or installer acceptance."
+          } | ConvertTo-Json | Tee-Object evidence/windows-capability.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-0-windows-evidence
+          path: evidence/
