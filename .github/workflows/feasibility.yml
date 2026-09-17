@@ -1,0 +1,66 @@
+name: Stage 1 local AI and Windows package
+on:
+  push:
+    paths: ['src/**', 'tests/**', 'scripts/**', 'requirements*.txt', '.github/workflows/feasibility.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CMAKE_ARGS: '-DGGML_CUDA=OFF -DGGML_NATIVE=OFF'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Provision verified local model
+        run: python scripts/provision.py
+      - name: Real CPU inference and grounding
+        id: inference
+        continue-on-error: true
+        run: python scripts/feasibility.py
+      - name: Build self-contained desktop prototype
+        run: python -m PyInstaller --noconfirm --onedir --windowed --name PrivateDocsAI --paths src --collect-all llama_cpp --add-data "models;models" src/app.py
+      - name: Package installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" scripts/installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install and test packaged local inference
+        shell: pwsh
+        run: |
+          $installer = Start-Process dist/PrivateDocsAI-Feasibility-Setup.exe -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+          if ($installer.ExitCode -ne 0) { throw "Installer failed" }
+          $app = "$env:LOCALAPPDATA\PrivateDocsAI-Feasibility\PrivateDocsAI.exe"
+          $result = "$env:GITHUB_WORKSPACE\evidence\packaged-inference.json"
+          $run = Start-Process $app -ArgumentList @('--self-test', $result) -Wait -PassThru
+          if ($run.ExitCode -ne 0) { throw "Packaged inference failed" }
+          Get-Content $result
+      - name: Record installed size
+        shell: pwsh
+        run: |
+          $size = (Get-ChildItem "$env:LOCALAPPDATA\PrivateDocsAI-Feasibility" -File -Recurse | Measure-Object Length -Sum).Sum
+          @{installed_bytes=$size; installer_bytes=(Get-Item dist/PrivateDocsAI-Feasibility-Setup.exe).Length} | ConvertTo-Json | Set-Content evidence/package-size.json
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-1-evidence
+          path: |
+            evidence/
+            models/manifest.json
+      - name: Upload prototype installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivateDocsAI-feasibility-installer
+          path: dist/PrivateDocsAI-Feasibility-Setup.exe
+      - name: Enforce grounding gate
+        if: steps.inference.outcome != 'success'
+        run: exit 1
